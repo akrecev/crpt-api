@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import lombok.Builder;
+import lombok.extern.slf4j.Slf4j;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -14,7 +15,10 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+@Slf4j
 public class CrptApi {
+    private static final String API_URL = "https://ismp.crpt.ru/api/v3/lk/documents/create";
+
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
     private final ScheduledExecutorService scheduler;
@@ -24,7 +28,8 @@ public class CrptApi {
 
     public CrptApi(TimeUnit timeUnit, int requestLimit) {
         this.httpClient = HttpClient.newHttpClient();
-        this.objectMapper = new ObjectMapper();
+        this.objectMapper = new ObjectMapper()
+                .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
         this.scheduler = Executors.newScheduledThreadPool(1);
         this.requestLimit = requestLimit;
         this.requestCount = new AtomicInteger(0);
@@ -38,7 +43,7 @@ public class CrptApi {
             api.createDocument(createDescription(), new Product[]{createProduct()});
             api.shutdown();
         } catch (Exception e) {
-            e.printStackTrace();
+            log.error("Error during API call", e);
         }
     }
 
@@ -46,15 +51,15 @@ public class CrptApi {
         scheduler.scheduleAtFixedRate(() -> requestCount.set(0), intervalMillis, intervalMillis, TimeUnit.MILLISECONDS);
     }
 
-    private void createDocument(Description description, Product[] products) throws Exception {
-        while (requestCount.incrementAndGet() > requestLimit) {
-            requestCount.decrementAndGet();
-            Thread.sleep(intervalMillis);
+    public void createDocument(Description description, Product[] products) throws Exception {
+        if (!waitForRateLimit()) {
+            log.warn("Rate limit exceeded, skipping request");
+            return;
         }
 
         String requestBody = objectMapper.writeValueAsString(createDocumentRequest(description, products));
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(new URI("https://ismp.crpt.ru/api/v3/lk/documents/create"))
+                .uri(new URI(API_URL))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                 .build();
@@ -62,11 +67,25 @@ public class CrptApi {
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
         if (response.statusCode() != 200) {
+            log.error("Failed to create document: " + response.body());
             throw new RuntimeException("Failed to create document: " + response.body());
+        } else {
+            log.info("Document created successfully: " + response.body());
         }
     }
 
-    private void shutdown() {
+    private boolean waitForRateLimit() throws InterruptedException {
+        while (true) {
+            int currentCount = requestCount.incrementAndGet();
+            if (currentCount <= requestLimit) {
+                return true;
+            }
+            requestCount.decrementAndGet();
+            Thread.sleep(intervalMillis);
+        }
+    }
+
+    public void shutdown() {
         scheduler.shutdown();
     }
 
@@ -108,24 +127,41 @@ public class CrptApi {
                 .build();
     }
 
-
     @Builder(toBuilder = true)
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    public record DocumentRequest(Description description, String docId, String docStatus, String docType,
-                                  boolean importRequest, String ownerInn, String participantInn, String producerInn,
-                                  String productionDate, String productionType, Product[] products, String regDate,
-                                  String regNumber) {
+    public static class DocumentRequest {
+        private final Description description;
+        private final String docId;
+        private final String docStatus;
+        private final String docType;
+        private final boolean importRequest;
+        private final String ownerInn;
+        private final String participantInn;
+        private final String producerInn;
+        private final String productionDate;
+        private final String productionType;
+        private final Product[] products;
+        private final String regDate;
+        private final String regNumber;
     }
 
     @Builder(toBuilder = true)
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    public record Description(String participantInn) {
+    public static class Description {
+        private final String participantInn;
     }
 
     @Builder(toBuilder = true)
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
-    public record Product(String certificateDocument, String certificateDocumentDate, String certificateDocumentNumber,
-                          String ownerInn, String producerInn, String productionDate, String tnvedCode, String uitCode,
-                          String uituCode) {
+    public static class Product {
+        private final String certificateDocument;
+        private final String certificateDocumentDate;
+        private final String certificateDocumentNumber;
+        private final String ownerInn;
+        private final String producerInn;
+        private final String productionDate;
+        private final String tnvedCode;
+        private final String uitCode;
+        private final String uituCode;
     }
 }
